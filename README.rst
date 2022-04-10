@@ -14,6 +14,8 @@ Red-Lavalink
     :target: https://github.com/ambv/black
     :alt: Code style: black
 
+Test branch for SB.
+
 A Lavalink client library written for Python 3.8 using the AsyncIO framework.
 This library may be used for other projects as it contains no Red specific code or logic.
 
