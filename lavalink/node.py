@@ -637,13 +637,6 @@ class Node:
             _nodes.remove(self)
         ws_ll_log.info("Shutdown Lavalink WS.")
 
-    async def send(self, data):
-        if self._ws is None or self._ws.closed:
-            self._queue.append(data)
-        else:
-            ws_ll_log.trace("Sending data to Lavalink node: %s", data)
-            await self._ws.send_json(data)
-
     async def send_lavalink_voice_update(self, guild_id, session_id, event):
         await self.send(
             {

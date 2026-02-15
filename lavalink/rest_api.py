@@ -11,6 +11,11 @@ from . import log
 from .enums import ExceptionSeverity, LoadType, PlayerState
 from .utils import VoiceChannel
 
+try:
+    from types import EllipsisType
+except ImportError:
+    EllipsisType = type(...)
+
 __all__ = ("Track", "RESTClient", "PlaylistInfo")
 
 _PlaylistInfo = namedtuple("PlaylistInfo", "name selectedTrack")
@@ -275,10 +280,13 @@ class RESTClient:
     Client class used to access the REST endpoints on a Lavalink node.
     """
 
+    API_VERSION = 4
+
     def __init__(self, client: discord.Client, channel: VoiceChannel):
         from lavalink.node import get_node
 
         self.node = get_node()
+        self.session_id = ""  # something that node should be getting in the ready op
         self.client = client
         self.state: PlayerState = PlayerState.CREATED
         self.channel: discord.VoiceChannel = channel
@@ -290,7 +298,7 @@ class RESTClient:
             protocol = "https"
         else:
             protocol = "http"
-        self._uri: str = f"{protocol}://{self.node.host}:{self.node.port}/loadtracks?identifier="
+        self._uri: str = f"{protocol}://{self.node.host}:{self.node.port}/v{self.API_VERSION}"
         self._headers: Dict[str, str] = {"Authorization": self.node.password}
         self._warned: bool = False
 
@@ -298,23 +306,27 @@ class RESTClient:
         if self.state != PlayerState.READY:
             raise RuntimeError("Cannot execute REST request when node not ready.")
 
-    async def _get(self, url):
+    async def _request(self, method, endpoint, params=None, json=None):
+        url = f"{self._uri}{endpoint}"
         try:
-            async with self._session.get(url, headers=self._headers) as resp:
+            async with self._session.request(
+                method, url, headers=self._headers, params=params, json=json
+            ) as resp:
                 data = await resp.json(content_type=None)
         except ServerDisconnectedError:
-            if self.state == PlayerState.DISCONNECTING:
-                return {
-                    "loadType": LoadType.LOAD_FAILED,
-                    "exception": {
-                        "message": "Load tracks interrupted by player disconnect.",
-                        "severity": ExceptionSeverity.COMMON,
-                    },
-                    "tracks": [],
-                }
-            log.debug("Received server disconnected error when player state = %s", self.state.name)
+            if self.state != PlayerState.DISCONNECTING:
+                log.debug("Received server disconnected error when player state = %s", self.state.name)
             raise
         return data
+
+    async def _get(self, endpoint):
+        return self._request("GET", endpoint)
+
+    async def _post(self, endpoint, params=None, json=None):
+        return self._request("POST", endpoint, params=params, json=json)
+
+    async def _patch(self, endpoint, params=None, json=None):
+        return self._request("PATCH", endpoint, params=params, json=json)
 
     async def load_tracks(self, query) -> LoadResult:
         """
@@ -331,21 +343,36 @@ class RESTClient:
         self.__check_node_ready()
         _raw_url = str(query)
         parsed_url = reformat_query(_raw_url)
-        url = self._uri + quote(parsed_url)
+        endpoint = "/loadtracks?identifier=" + quote(parsed_url)
 
-        data = await self._get(url)
+        try:
+            data = await self._get(endpoint)
+        except ServerDisconnectedError:
+            if self.state != PlayerState.DISCONNECTING:
+                raise
+
+            data = {
+                "loadType": LoadType.LOAD_FAILED,
+                "exception": {
+                    "message": "Load tracks interrupted by player disconnect.",
+                    "severity": ExceptionSeverity.COMMON,
+                },
+                "tracks": [],
+            }
+
         if isinstance(data, dict):
             data["query"] = _raw_url
-            data["encodedquery"] = url
             return LoadResult(data)
         elif isinstance(data, list):
             modified_data = {
                 "loadType": LoadType.V2_COMPAT,
                 "tracks": data,
                 "query": _raw_url,
-                "encodedquery": url,
             }
             return LoadResult(modified_data)
+        return LoadResult(
+            {"loadType": LoadType.LOAD_FAILED.value, "playlistInfo": {}, "tracks": []}
+        )
 
     async def get_tracks(self, query) -> Tuple[Track, ...]:
         """
@@ -392,3 +419,62 @@ class RESTClient:
         list of Track
         """
         return await self.load_tracks("scsearch:{}".format(query))
+
+    async def _update_player(
+        self,
+        guild_id: int,
+        *,
+        encoded_track: Union[None, str, EllipsisType] = ...,
+        identifier: Union[str, EllipsisType] = ...,
+        replace: bool = True,
+        position: Union[int, None] = None,
+        end_time: Union[int, None, EllipsisType] = ...,
+        volume: Union[int, None] = None,
+        paused: Union[bool, None] = None,
+        voice_state: Union[_VoiceState, None] = None,
+    ) -> None:
+        if encoded_track is not ... and identifier is not ...:
+            raise TypeError("encoded_track and identifier are mutually exclusive.")
+        params = {}
+        payload = {}
+        if encoded_track is not ... or identifier is not ...:
+            payload["track"] = update_player_track = {}
+            if encoded_track is not ...:
+                update_player_track["encodedTrack"] = encoded_track
+            if identifier is not ...:
+                update_player_track["identifier"] = identifier
+            if not replace:
+                params["noReplace"] = "true"
+        if position is not None:
+            update_player_track["position"] = position
+        if end_time is not ...:
+            update_player_track["endTime"] = end_time
+        if volume is not None:
+            update_player_track["volume"] = volume
+        if paused is not None:
+            update_player_track["paused"] = paused
+        if voice_state is not None:
+            update_player_track["voice"] = voice_state
+
+        self._patch(f"/sessions/{self.session_id}/players/{guild_id}", params=params, json=payload)
+
+    async def send_lavalink_voice_update(self, guild_id, session_id, event):
+        await self._patch(
+            "/"
+            {
+                "op": LavalinkOutgoingOp.VOICE_UPDATE.value,
+                "guildId": str(guild_id),
+                "sessionId": session_id,
+                "event": event,
+            }
+        )
+
+
+class _VoiceState:
+    def __init__(self, *, token: str, endpoint: str, session_id: str) -> None:
+        self.token = token
+        self.endpoint = endpoint
+        self.session_id = session_id
+
+    def to_dict(self) -> None:
+        return {"token": self.token, "endpoint": self.endpoint, "sessionId": self.session_id}
