@@ -52,6 +52,7 @@ class Player(RESTClient, VoiceProtocol):
         self.repeat: bool = False
         self.shuffle: bool = False
         self.shuffle_bumped: bool = True
+        self.connection_id: Optional[str] = None
         self._is_autoplaying: bool = False
         self._auto_play_sent: bool = False
         self._volume: int = 100
@@ -120,7 +121,14 @@ class Player(RESTClient, VoiceProtocol):
         return self._connected
 
     async def on_voice_server_update(self, data: dict, /) -> None:
+        old_connection_id = self.connection_id
+        self.connection_id = data["connection_id"]
         self._pending_server_update = data
+        if not old_connection_id and self.connection_id:
+            await self.guild.change_voice_state(
+                channel=self.channel,
+                connection_id=self.connection_id,
+            )
         await self._send_lavalink_voice_update()
 
     async def on_voice_state_update(self, data: dict, /) -> None:
@@ -197,7 +205,7 @@ class Player(RESTClient, VoiceProtocol):
         self.node._players_dict[self.guild.id] = self
         await self.node.refresh_player_state(self)
         await self.guild.change_voice_state(
-            channel=self.channel, self_mute=self_mute, self_deaf=self_deaf
+            channel=self.channel, connection_id=None, self_mute=self_mute, self_deaf=self_deaf
         )
 
     async def move_to(self, channel: discord.VoiceChannel, *, self_deaf: bool = False) -> None:
