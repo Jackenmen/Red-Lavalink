@@ -32,11 +32,14 @@ def _get_version() -> str:
     else:
         import traceback
 
+        lines = []
         for exc in exceptions:
-            traceback.print_exception(None, exc, exc.__traceback__)
+            lines.extend(traceback.format_exception(None, exc, exc.__traceback__))
             exc.__traceback__ = None
 
         version = raw_version
+
+        raise RuntimeError("".join(lines))
 
     return version
 
